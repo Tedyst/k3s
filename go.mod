@@ -1,6 +1,6 @@
 module github.com/rancher/k3s
 
-go 1.12
+go 1.13
 
 replace (
 	github.com/Microsoft/hcsshim => github.com/Microsoft/hcsshim v0.8.7-0.20190926181021-82c7525d98c8
@@ -125,3 +125,5 @@ require (
 	k8s.io/kubernetes v1.16.0
 	k8s.io/utils v0.0.0-20190829053155-3a4a5477acf8 // indirect
 )
+
+replace github.com/rancher/helm-controller => github.com/Tedyst/helm-controller v0.2.3-0.20191027162721-a8e6024878cc
