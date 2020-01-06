@@ -71,6 +71,8 @@ github.com/SermoDigital/jose v0.9.1/go.mod h1:ARgCUhI1MHQH+ONky/PAtmVHQrP5JlGY0F
 github.com/Shopify/sarama v1.19.0/go.mod h1:FVkBWblsNy7DGZRfXLU0O9RCGt5g3g3yEuWXgklEdEo=
 github.com/Shopify/toxiproxy v2.1.4+incompatible/go.mod h1:OXgGpZ6Cli1/URJOF1DMxUHB2q5Ap20/P/eIdh4G0pI=
 github.com/StackExchange/wmi v0.0.0-20180116203802-5d049714c4a6/go.mod h1:3eOhrUMpNV+6aFIbp5/iudMxNCF27Vw2OZgy4xEx0Fg=
+github.com/Tedyst/helm-controller v0.2.3-0.20200106090517-b1be2a9c8feb h1:r9Rsayka4Q06EGqB3PZhf0oRql/kCZ/Aaidmn8r0y0s=
+github.com/Tedyst/helm-controller v0.2.3-0.20200106090517-b1be2a9c8feb/go.mod h1:194LHuZRrxcD82bG1rJtOWsw98U4JbPhDWqvL7l3PAw=
 github.com/Venafi/vcert v0.0.0-20190613103158-62139eb19b25/go.mod h1:3sXw16DKVded/kLVDma2veqEUQC7O37h98ims7cIvN4=
 github.com/agnivade/levenshtein v1.0.1/go.mod h1:CURSv5d9Uaml+FovSIICkLbAUZ9S4RqaHDIsdSBg7lM=
 github.com/alexflint/go-filemutex v0.0.0-20171022225611-72bdc8eae2ae/go.mod h1:CgnQgUtFrFz9mxFNtED3jI5tLDjKlOM+oUF/sTk6ps0=
@@ -713,14 +715,6 @@ github.com/rancher/dynamiclistener v0.2.0 h1:KucYwJXVVGhZ/NndfMCeQoCafT/VN7kvqSG
 github.com/rancher/dynamiclistener v0.2.0/go.mod h1:fs/dxyNcB3YT6W9fVz4bDGfhmSQS17QQup6BIcGF++s=
 github.com/rancher/flannel v0.11.0-k3s.1 h1:mIwnfWDafjzQgFkZeJ1AkFrrAT3EdBaA1giE0eLJKo8=
 github.com/rancher/flannel v0.11.0-k3s.1/go.mod h1:Hn4ZV+eq0LhLZP63xZnxdGwXEoRSxs5sxELxu27M3UA=
-github.com/rancher/helm-controller v0.3.0 h1:sYRpOiJc4+NmSEkft3lR2pwaEPOrPzZOTo2UjFnVF4I=
-github.com/rancher/helm-controller v0.3.0/go.mod h1:194LHuZRrxcD82bG1rJtOWsw98U4JbPhDWqvL7l3PAw=
-github.com/rancher/helm-controller v0.4.0 h1:VO7TqMsMWh3TJK7U38LLht1uHiDy0fSYWSywT0bE5lY=
-github.com/rancher/helm-controller v0.4.0/go.mod h1:194LHuZRrxcD82bG1rJtOWsw98U4JbPhDWqvL7l3PAw=
-github.com/rancher/helm-controller v0.4.1-0.20191219210749-b81cad6ffd60 h1:c4UL7AcwFGoZIit6EoVS9S1ylj4IGhPCtQM23iFXBzA=
-github.com/rancher/helm-controller v0.4.1-0.20191219210749-b81cad6ffd60/go.mod h1:194LHuZRrxcD82bG1rJtOWsw98U4JbPhDWqvL7l3PAw=
-github.com/rancher/helm-controller v0.4.1-0.20191223195946-ae918063bc54 h1:S/IAloMp6MYYtoHKfJUS5M3Wv0CU+5Ixe1nnSv2pQUU=
-github.com/rancher/helm-controller v0.4.1-0.20191223195946-ae918063bc54/go.mod h1:194LHuZRrxcD82bG1rJtOWsw98U4JbPhDWqvL7l3PAw=
 github.com/rancher/kine v0.3.2 h1:2kP48ojBWVoZ6vlzixc9jc9uKRk7Yn1a7kWoOsJi7Sg=
 github.com/rancher/kine v0.3.2/go.mod h1:xEMl0tLCva9/9me7mXJ3m9Vo6yqHgC4OU3NiK4CPrGQ=
 github.com/rancher/kubernetes v1.17.0-k3s.1 h1:g1xvTHOHMJxwWtseblor0gighLRHpL7Bf9MwX8HR3W0=

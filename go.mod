@@ -128,4 +128,4 @@ require (
 	k8s.io/kubernetes v1.16.0
 )
 
-replace github.com/rancher/helm-controller => github.com/Tedyst/helm-controller v0.2.3-0.20191027162721-a8e6024878cc
+replace github.com/rancher/helm-controller => github.com/Tedyst/helm-controller v0.2.3-0.20200106090517-b1be2a9c8feb
