@@ -58,8 +58,14 @@ fi
 
 mkdir -p bin
 
-if [ -z "$GOARM" ] && [ "arm" = "$(go env GOARCH)" ]; then
-    GOARM=7
+# Allow cross-compiling to arm
+if [ "$1" == "arm" ]; then
+    export GOOS=linux
+    export GOARCH=arm
+    export GOARM=6
+    export CC=arm-linux-gnueabi-gcc
+    export CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH
+    go env
 fi
 
 rm -f \
@@ -109,7 +115,12 @@ ln -s containerd ./bin/ctr
 # echo Building containerd
 # CGO_ENABLED=0 go build -tags "$TAGS" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC" -o bin/containerd ./cmd/containerd/
 echo Building runc
-make EXTRA_LDFLAGS="-w -s" BUILDTAGS="apparmor seccomp" -C ./vendor/github.com/opencontainers/runc static
+
+if [ "$1" == "arm" ]; then
+    make EXTRA_LDFLAGS="-w -s" BUILDTAGS="apparmor" -C ./vendor/github.com/opencontainers/runc static
+else
+    make EXTRA_LDFLAGS="-w -s" BUILDTAGS="apparmor seccomp" -C ./vendor/github.com/opencontainers/runc static
+fi
 cp -f ./vendor/github.com/opencontainers/runc/runc ./bin/runc
 
 echo Building containerd-shim
