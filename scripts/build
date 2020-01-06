@@ -58,17 +58,6 @@ fi
 
 mkdir -p bin
 
-# Allow cross-compiling to arm
-if [ "${ARCH}" == "arm" ]; then
-    export TAGS="ctrd apparmor no_btrfs netcgo osusergo providerless $DQLITE_TAGS"
-    export GOOS=linux
-    export GOARCH=arm
-    export GOARM=6
-    export CC=arm-linux-gnueabi-gcc
-    export CMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH
-    go env
-fi
-
 rm -f \
     bin/k3s-agent \
     bin/hyperkube \
@@ -103,7 +92,13 @@ fi
 # echo Building agent
 # CGO_ENABLED=1 go build -tags "$TAGS" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC" -o bin/k3s-agent ./cmd/agent/main.go
 echo Building server
-CGO_ENABLED=1 go build -tags "$TAGS" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC_SQLITE" -o bin/containerd ./cmd/server/main.go
+# Allow cross-compiling to arm
+if [ "${ARCH}" == "armel" ]; then
+    TAGS="ctrd apparmor no_btrfs netcgo osusergo providerless $DQLITE_TAGS"
+    CGO_ENABLED=1 GOOS=linux GOARCH=arm GOARM=6 CC=arm-linux-gnueabi-gcc go build -tags "$TAGS" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC_SQLITE" -o bin/containerd ./cmd/server/main.go
+else
+    CGO_ENABLED=1 go build -tags "$TAGS" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC_SQLITE" -o bin/containerd ./cmd/server/main.go
+fi
 ln -s containerd ./bin/k3s-agent
 ln -s containerd ./bin/k3s-server
 ln -s containerd ./bin/kubectl
@@ -117,17 +112,29 @@ ln -s containerd ./bin/ctr
 # CGO_ENABLED=0 go build -tags "$TAGS" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC" -o bin/containerd ./cmd/containerd/
 echo Building runc
 
-if [ "${ARCH}" == "arm" ]; then
-    make EXTRA_LDFLAGS="-w -s" BUILDTAGS="apparmor" -C ./vendor/github.com/opencontainers/runc static
-else
+if [ "${ARCH}" == "armel" ]; then
+    make EXTRA_LDFLAGS="-w -s" BUILDTAGS="apparmor" -C ./vendor/github.com/opencontainers/runc localcross
+    cp -f ./vendor/github.com/opencontainers/runc/runc-armel ./bin/runc
+elif [ "${ARCH}" == "amd64" ]; then
     make EXTRA_LDFLAGS="-w -s" BUILDTAGS="apparmor seccomp" -C ./vendor/github.com/opencontainers/runc static
+    cp -f ./vendor/github.com/opencontainers/runc/runc ./bin/runc
 fi
-cp -f ./vendor/github.com/opencontainers/runc/runc ./bin/runc
+
 
 echo Building containerd-shim
-make -C ./vendor/github.com/containerd/containerd bin/containerd-shim
+
+if [ "${ARCH}" == "armel" ]; then
+    make GOOS=linux GOARCH=arm GOARM=6 CC=arm-linux-gnueabi-gcc -C ./vendor/github.com/containerd/containerd bin/containerd-shim
+elif [ "${ARCH}" == "amd64" ]; then
+    make -C ./vendor/github.com/containerd/containerd bin/containerd-shim
+fi
 cp -f ./vendor/github.com/containerd/containerd/bin/containerd-shim ./bin/containerd-shim
 
 echo Building containerd-shim-runc-v2
-make -C ./vendor/github.com/containerd/containerd bin/containerd-shim-runc-v2
+
+if [ "${ARCH}" == "armel" ]; then
+    make GOOS=linux GOARCH=arm GOARM=6 CC=arm-linux-gnueabi-gcc -C ./vendor/github.com/containerd/containerd bin/containerd-shim-runc-v2
+elif [ "${ARCH}" == "amd64" ]; then
+    make -C ./vendor/github.com/containerd/containerd bin/containerd-shim-runc-v2
+fi
 cp -f ./vendor/github.com/containerd/containerd/bin/containerd-shim-runc-v2 ./bin/containerd-shim-runc-v2
