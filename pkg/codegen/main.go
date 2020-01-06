@@ -36,7 +36,8 @@ func main() {
 	bc = &bindata.Config{
 		Input: []bindata.InputConfig{
 			{
-				Path: "manifests",
+				Path:      "manifests",
+				Recursive: true,
 			},
 		},
 		Package:    "deploy",
@@ -70,7 +71,6 @@ func main() {
 		Groups: map[string]args.Group{
 			"k3s.cattle.io": {
 				Types: []interface{}{
-					v1.ListenerConfig{},
 					v1.Addon{},
 				},
 				GenerateTypes: true,

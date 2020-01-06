@@ -3,13 +3,9 @@ package control
 import (
 	"context"
 	"crypto"
-	cryptorand "crypto/rand"
 	"crypto/x509"
-	"encoding/csv"
-	"encoding/hex"
 	"fmt"
 	"html/template"
-	"io"
 	"io/ioutil"
 	"math/rand"
 	"net"
@@ -21,22 +17,28 @@ import (
 	"strings"
 	"time"
 
-	certutil "github.com/rancher/dynamiclistener/cert"
 	// registering k3s cloud provider
 	_ "github.com/rancher/k3s/pkg/cloudprovider"
+
+	"github.com/pkg/errors"
+	certutil "github.com/rancher/dynamiclistener/cert"
+	"github.com/rancher/k3s/pkg/clientaccess"
+	"github.com/rancher/k3s/pkg/cluster"
 	"github.com/rancher/k3s/pkg/daemons/config"
-	"github.com/rancher/kine/pkg/client"
-	"github.com/rancher/kine/pkg/endpoint"
+	"github.com/rancher/k3s/pkg/passwd"
+	"github.com/rancher/k3s/pkg/token"
 	"github.com/rancher/wrangler-api/pkg/generated/controllers/rbac"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	_ "k8s.io/component-base/metrics/prometheus/restclient" // for client metric registration
 	ccmapp "k8s.io/kubernetes/cmd/cloud-controller-manager/app"
+	app2 "k8s.io/kubernetes/cmd/controller-manager/app"
 	"k8s.io/kubernetes/cmd/kube-apiserver/app"
 	cmapp "k8s.io/kubernetes/cmd/kube-controller-manager/app"
 	sapp "k8s.io/kubernetes/cmd/kube-scheduler/app"
-	_ "k8s.io/kubernetes/pkg/client/metrics/prometheus" // for client metric registration
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
 	"k8s.io/kubernetes/pkg/master"
 	"k8s.io/kubernetes/pkg/proxy/util"
@@ -80,7 +82,7 @@ func Server(ctx context.Context, cfg *config.Control) error {
 	cfg.Runtime = runtime
 
 	if err := prepare(ctx, cfg, runtime); err != nil {
-		return err
+		return errors.Wrap(err, "preparing server")
 	}
 
 	cfg.Runtime.Tunnel = setupTunnel()
@@ -88,6 +90,10 @@ func Server(ctx context.Context, cfg *config.Control) error {
 
 	auth, handler, err := apiServer(ctx, cfg, runtime)
 	if err != nil {
+		return err
+	}
+
+	if err := waitForAPIServer(ctx, runtime); err != nil {
 		return err
 	}
 
@@ -101,7 +107,7 @@ func Server(ctx context.Context, cfg *config.Control) error {
 	controllerManager(cfg, runtime)
 
 	if !cfg.DisableCCM {
-		cloudControllerManager(cfg, runtime)
+		cloudControllerManager(ctx, cfg, runtime)
 	}
 
 	return nil
@@ -291,6 +297,8 @@ func prepare(ctx context.Context, config *config.Control, runtime *config.Contro
 	runtime.ClientKubeAPIKey = path.Join(config.DataDir, "tls", "client-kube-apiserver.key")
 	runtime.ClientKubeProxyCert = path.Join(config.DataDir, "tls", "client-kube-proxy.crt")
 	runtime.ClientKubeProxyKey = path.Join(config.DataDir, "tls", "client-kube-proxy.key")
+	runtime.ClientK3sControllerCert = path.Join(config.DataDir, "tls", "client-k3s-controller.crt")
+	runtime.ClientK3sControllerKey = path.Join(config.DataDir, "tls", "client-k3s-controller.key")
 
 	runtime.ServingKubeAPICert = path.Join(config.DataDir, "tls", "serving-kube-apiserver.crt")
 	runtime.ServingKubeAPIKey = path.Join(config.DataDir, "tls", "serving-kube-apiserver.key")
@@ -301,13 +309,9 @@ func prepare(ctx context.Context, config *config.Control, runtime *config.Contro
 	runtime.ClientAuthProxyCert = path.Join(config.DataDir, "tls", "client-auth-proxy.crt")
 	runtime.ClientAuthProxyKey = path.Join(config.DataDir, "tls", "client-auth-proxy.key")
 
-	etcdClient, err := prepareStorageBackend(ctx, config)
-	if err != nil {
-		return err
-	}
-	defer etcdClient.Close()
+	cluster := cluster.New(config)
 
-	if err := fetchBootstrapData(ctx, config, etcdClient); err != nil {
+	if err := cluster.Join(ctx); err != nil {
 		return err
 	}
 
@@ -327,122 +331,30 @@ func prepare(ctx context.Context, config *config.Control, runtime *config.Contro
 		return err
 	}
 
-	if err := storeBootstrapData(ctx, config, etcdClient); err != nil {
+	if err := readTokens(runtime); err != nil {
 		return err
 	}
 
-	return readTokens(runtime)
-}
-
-func prepareStorageBackend(ctx context.Context, config *config.Control) (client.Client, error) {
-	etcdConfig, err := endpoint.Listen(ctx, config.Storage)
-	if err != nil {
-		return nil, err
-	}
-
-	config.Storage.Config = etcdConfig.TLSConfig
-	config.Storage.Endpoint = strings.Join(etcdConfig.Endpoints, ",")
-	config.NoLeaderElect = !etcdConfig.LeaderElect
-	return client.New(etcdConfig)
-}
-
-func readTokenFile(passwdFile string) (map[string]string, error) {
-	f, err := os.Open(passwdFile)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	reader := csv.NewReader(f)
-	reader.FieldsPerRecord = -1
-
-	tokens := map[string]string{}
-
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		if len(record) < 2 {
-			continue
-		}
-		tokens[record[1]] = record[0]
-	}
-	return tokens, nil
+	return cluster.Start(ctx)
 }
 
 func readTokens(runtime *config.ControlRuntime) error {
-	tokens, err := readTokenFile(runtime.PasswdFile)
+	tokens, err := passwd.Read(runtime.PasswdFile)
 	if err != nil {
 		return err
 	}
 
-	if nodeToken, ok := tokens["node"]; ok {
-		runtime.NodeToken = "node:" + nodeToken
+	if nodeToken, ok := tokens.Pass("node"); ok {
+		runtime.AgentToken = "node:" + nodeToken
 	}
-	if clientToken, ok := tokens["admin"]; ok {
+	if serverToken, ok := tokens.Pass("server"); ok {
+		runtime.ServerToken = "server:" + serverToken
+	}
+	if clientToken, ok := tokens.Pass("admin"); ok {
 		runtime.ClientToken = "admin:" + clientToken
 	}
 
 	return nil
-}
-
-func ensureNodeToken(config *config.Control, runtime *config.ControlRuntime) error {
-	if config.ClusterSecret == "" {
-		return nil
-	}
-
-	f, err := os.Open(runtime.PasswdFile)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	records := [][]string{}
-	reader := csv.NewReader(f)
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		if len(record) < 3 {
-			return fmt.Errorf("password file '%s' must have at least 3 columns (password, user name, user uid), found %d", runtime.PasswdFile, len(record))
-		}
-		if record[1] == "node" {
-			if record[0] == config.ClusterSecret {
-				return nil
-			}
-			record[0] = config.ClusterSecret
-		}
-		records = append(records, record)
-	}
-
-	f.Close()
-	return WritePasswords(runtime.PasswdFile, records)
-}
-
-func WritePasswords(passwdFile string, records [][]string) error {
-	out, err := os.Create(passwdFile + ".tmp")
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	if err := out.Chmod(0600); err != nil {
-		return err
-	}
-
-	if err := csv.NewWriter(out).WriteAll(records); err != nil {
-		return err
-	}
-
-	return os.Rename(passwdFile+".tmp", passwdFile)
 }
 
 func genEncryptedNetworkInfo(controlConfig *config.Control, runtime *config.ControlRuntime) error {
@@ -455,7 +367,7 @@ func genEncryptedNetworkInfo(controlConfig *config.Control, runtime *config.Cont
 		return nil
 	}
 
-	psk, err := getToken(ipsecTokenSize)
+	psk, err := token.Random(ipsecTokenSize)
 	if err != nil {
 		return err
 	}
@@ -468,42 +380,74 @@ func genEncryptedNetworkInfo(controlConfig *config.Control, runtime *config.Cont
 	return nil
 }
 
-func genUsers(config *config.Control, runtime *config.ControlRuntime) error {
-	if s, err := os.Stat(runtime.PasswdFile); err == nil && s.Size() > 0 {
-		return ensureNodeToken(config, runtime)
+func migratePassword(p *passwd.Passwd) error {
+	server, _ := p.Pass("server")
+	node, _ := p.Pass("node")
+	if server == "" && node != "" {
+		return p.EnsureUser("server", "k3s:server", node)
 	}
-
-	adminToken, err := getToken(userTokenSize)
-	if err != nil {
-		return err
-	}
-	systemToken, err := getToken(userTokenSize)
-	if err != nil {
-		return err
-	}
-	nodeToken, err := getToken(userTokenSize)
-	if err != nil {
-		return err
-	}
-
-	if config.ClusterSecret != "" {
-		nodeToken = config.ClusterSecret
-	}
-
-	return WritePasswords(runtime.PasswdFile, [][]string{
-		{adminToken, "admin", "admin", "system:masters"},
-		{systemToken, "system", "system", "system:masters"},
-		{nodeToken, "node", "node", "system:masters"},
-	})
+	return nil
 }
 
-func getToken(size int) (string, error) {
-	token := make([]byte, size, size)
-	_, err := cryptorand.Read(token)
-	if err != nil {
-		return "", err
+func getServerPass(passwd *passwd.Passwd, config *config.Control) (string, error) {
+	var (
+		err error
+	)
+
+	serverPass := config.Token
+	if serverPass == "" {
+		serverPass, _ = passwd.Pass("server")
 	}
-	return hex.EncodeToString(token), err
+	if serverPass == "" {
+		serverPass, err = token.Random(16)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return serverPass, nil
+}
+
+func getNodePass(config *config.Control, serverPass string) string {
+	if config.AgentToken == "" {
+		if _, passwd, ok := clientaccess.ParseUsernamePassword(serverPass); ok {
+			return passwd
+		}
+		return serverPass
+	}
+	return config.AgentToken
+}
+
+func genUsers(config *config.Control, runtime *config.ControlRuntime) error {
+	passwd, err := passwd.Read(runtime.PasswdFile)
+	if err != nil {
+		return err
+	}
+
+	if err := migratePassword(passwd); err != nil {
+		return err
+	}
+
+	serverPass, err := getServerPass(passwd, config)
+	if err != nil {
+		return err
+	}
+
+	nodePass := getNodePass(config, serverPass)
+
+	if err := passwd.EnsureUser("admin", "system:masters", ""); err != nil {
+		return err
+	}
+
+	if err := passwd.EnsureUser("node", "k3s:agent", nodePass); err != nil {
+		return err
+	}
+
+	if err := passwd.EnsureUser("server", "k3s:server", serverPass); err != nil {
+		return err
+	}
+
+	return passwd.Write(runtime.PasswdFile)
 }
 
 func genCerts(config *config.Control, runtime *config.ControlRuntime) error {
@@ -578,7 +522,10 @@ func genClientCerts(config *config.Control, runtime *config.ControlRuntime) erro
 		}
 	}
 
-	if _, err = factory("system:kube-proxy", []string{"system:nodes"}, runtime.ClientKubeProxyCert, runtime.ClientKubeProxyKey); err != nil {
+	if _, err = factory("system:kube-proxy", nil, runtime.ClientKubeProxyCert, runtime.ClientKubeProxyKey); err != nil {
+		return err
+	}
+	if _, err = factory("system:k3s-controller", nil, runtime.ClientK3sControllerCert, runtime.ClientK3sControllerKey); err != nil {
 		return err
 	}
 
@@ -622,7 +569,7 @@ func genServerCerts(config *config.Control, runtime *config.ControlRuntime) erro
 		return err
 	}
 
-	_, apiServerServiceIP, err := master.DefaultServiceIPRange(*config.ServiceIPRange)
+	_, apiServerServiceIP, err := master.ServiceIPRange(*config.ServiceIPRange)
 	if err != nil {
 		return err
 	}
@@ -661,9 +608,17 @@ func genRequestHeaderCerts(config *config.Control, runtime *config.ControlRuntim
 }
 
 func createClientCertKey(regen bool, commonName string, organization []string, altNames *certutil.AltNames, extKeyUsage []x509.ExtKeyUsage, caCertFile, caKeyFile, certFile, keyFile string) (bool, error) {
+	caBytes, err := ioutil.ReadFile(caCertFile)
+	if err != nil {
+		return false, err
+	}
+
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(caBytes)
+
 	// check for certificate expiration
 	if !regen {
-		regen = expired(certFile)
+		regen = expired(certFile, pool)
 	}
 
 	if !regen {
@@ -682,15 +637,11 @@ func createClientCertKey(regen bool, commonName string, organization []string, a
 		return false, err
 	}
 
-	caBytes, err := ioutil.ReadFile(caCertFile)
-	if err != nil {
-		return false, err
-	}
-
 	caCert, err := certutil.ParseCertsPEM(caBytes)
 	if err != nil {
 		return false, err
 	}
+
 	keyBytes, _, err := certutil.LoadOrGenerateKeyFile(keyFile, regen)
 	if err != nil {
 		return false, err
@@ -795,22 +746,22 @@ func KubeConfig(dest, url, caCert, clientCert, clientKey string) error {
 func setupStorageBackend(argsMap map[string]string, cfg *config.Control) {
 	argsMap["storage-backend"] = "etcd3"
 	// specify the endpoints
-	if len(cfg.Storage.Endpoint) > 0 {
-		argsMap["etcd-servers"] = cfg.Storage.Endpoint
+	if len(cfg.Datastore.Endpoint) > 0 {
+		argsMap["etcd-servers"] = cfg.Datastore.Endpoint
 	}
 	// storage backend tls configuration
-	if len(cfg.Storage.CAFile) > 0 {
-		argsMap["etcd-cafile"] = cfg.Storage.CAFile
+	if len(cfg.Datastore.CAFile) > 0 {
+		argsMap["etcd-cafile"] = cfg.Datastore.CAFile
 	}
-	if len(cfg.Storage.CertFile) > 0 {
-		argsMap["etcd-certfile"] = cfg.Storage.CertFile
+	if len(cfg.Datastore.CertFile) > 0 {
+		argsMap["etcd-certfile"] = cfg.Datastore.CertFile
 	}
-	if len(cfg.Storage.KeyFile) > 0 {
-		argsMap["etcd-keyfile"] = cfg.Storage.KeyFile
+	if len(cfg.Datastore.KeyFile) > 0 {
+		argsMap["etcd-keyfile"] = cfg.Datastore.KeyFile
 	}
 }
 
-func expired(certFile string) bool {
+func expired(certFile string, pool *x509.CertPool) bool {
 	certBytes, err := ioutil.ReadFile(certFile)
 	if err != nil {
 		return false
@@ -819,10 +770,19 @@ func expired(certFile string) bool {
 	if err != nil {
 		return false
 	}
+	_, err = certificates[0].Verify(x509.VerifyOptions{
+		Roots: pool,
+		KeyUsages: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageAny,
+		},
+	})
+	if err != nil {
+		return true
+	}
 	return certutil.IsCertExpired(certificates[0])
 }
 
-func cloudControllerManager(cfg *config.Control, runtime *config.ControlRuntime) {
+func cloudControllerManager(ctx context.Context, cfg *config.Control, runtime *config.ControlRuntime) {
 	argsMap := map[string]string{
 		"kubeconfig":                   runtime.KubeConfigCloudController,
 		"allocate-node-cidrs":          "true",
@@ -848,8 +808,12 @@ func cloudControllerManager(cfg *config.Control, runtime *config.ControlRuntime)
 			// check for the cloud controller rbac binding
 			if err := checkForCloudControllerPrivileges(runtime); err != nil {
 				logrus.Infof("Waiting for cloudcontroller rbac role to be created")
-				time.Sleep(time.Second)
-				continue
+				select {
+				case <-ctx.Done():
+					logrus.Fatalf("cloud-controller-manager context canceled: %v", ctx.Err())
+				case <-time.After(time.Second):
+					continue
+				}
 			}
 			break
 		}
@@ -869,4 +833,32 @@ func checkForCloudControllerPrivileges(runtime *config.ControlRuntime) error {
 		return err
 	}
 	return nil
+}
+
+func waitForAPIServer(ctx context.Context, runtime *config.ControlRuntime) error {
+	restConfig, err := clientcmd.BuildConfigFromFlags("", runtime.KubeConfigAdmin)
+	if err != nil {
+		return err
+	}
+
+	k8sClient, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-promise(func() error { return app2.WaitForAPIServer(k8sClient, 5*time.Minute) }):
+		return err
+	}
+}
+
+func promise(f func() error) <-chan error {
+	c := make(chan error, 1)
+	go func() {
+		c <- f()
+		close(c)
+	}()
+	return c
 }

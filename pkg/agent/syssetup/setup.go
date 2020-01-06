@@ -8,11 +8,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var (
-	callIPTablesFile = "/proc/sys/net/bridge/bridge-nf-call-iptables"
-	forward          = "/proc/sys/net/ipv4/ip_forward"
-)
-
 func loadKernelModule(moduleName string) {
 	if _, err := os.Stat("/sys/module/" + moduleName); err == nil {
 		logrus.Infof("module %s was already loaded", moduleName)
@@ -24,20 +19,24 @@ func loadKernelModule(moduleName string) {
 	}
 }
 
-func Configure() error {
-	loadKernelModule("br_netfilter")
-
-	if err := ioutil.WriteFile(callIPTablesFile, []byte("1"), 0640); err != nil {
-		logrus.Warnf("failed to write value 1 at %s: %v", callIPTablesFile, err)
-		return nil
+func enableSystemControl(file string) {
+	if err := ioutil.WriteFile(file, []byte("1"), 0640); err != nil {
+		logrus.Warnf("failed to write value 1 at %s: %v", file, err)
 	}
-	if err := ioutil.WriteFile(forward, []byte("1"), 0640); err != nil {
-		logrus.Warnf("failed to write value 1 at %s: %v", forward, err)
-		return nil
-	}
+}
 
+func Configure() {
 	loadKernelModule("overlay")
 	loadKernelModule("nf_conntrack")
+	loadKernelModule("br_netfilter")
 
-	return nil
+	// Kernel is inconsistent about how devconf is configured for
+	// new network namespaces between ipv4 and ipv6. Make sure to
+	// enable forwarding on all and default for both ipv4 and ipv8.
+	enableSystemControl("/proc/sys/net/ipv4/conf/all/forwarding")
+	enableSystemControl("/proc/sys/net/ipv4/conf/default/forwarding")
+	enableSystemControl("/proc/sys/net/ipv6/conf/all/forwarding")
+	enableSystemControl("/proc/sys/net/ipv6/conf/default/forwarding")
+	enableSystemControl("/proc/sys/net/bridge/bridge-nf-call-iptables")
+	enableSystemControl("/proc/sys/net/bridge/bridge-nf-call-ip6tables")
 }

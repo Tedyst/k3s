@@ -2,19 +2,26 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
-	"github.com/coreos/etcd/clientv3"
 	"github.com/rancher/kine/pkg/endpoint"
+	"go.etcd.io/etcd/clientv3"
 )
 
 type Value struct {
+	Key      []byte
 	Data     []byte
 	Modified int64
 }
 
+var (
+	ErrNotFound = errors.New("etcdwrapper: key not found")
+)
+
 type Client interface {
+	List(ctx context.Context, key string, rev int) ([]Value, error)
 	Get(ctx context.Context, key string) (Value, error)
 	Put(ctx context.Context, key string, value []byte) error
 	Create(ctx context.Context, key string, value []byte) error
@@ -46,6 +53,24 @@ func New(config endpoint.ETCDConfig) (Client, error) {
 	}, nil
 }
 
+func (c *client) List(ctx context.Context, key string, rev int) ([]Value, error) {
+	resp, err := c.c.Get(ctx, key, clientv3.WithPrefix(), clientv3.WithRev(int64(rev)))
+	if err != nil {
+		return nil, err
+	}
+
+	var vals []Value
+	for _, kv := range resp.Kvs {
+		vals = append(vals, Value{
+			Key:      kv.Key,
+			Data:     kv.Value,
+			Modified: kv.ModRevision,
+		})
+	}
+
+	return vals, nil
+}
+
 func (c *client) Get(ctx context.Context, key string) (Value, error) {
 	resp, err := c.c.Get(ctx, key)
 	if err != nil {
@@ -54,12 +79,13 @@ func (c *client) Get(ctx context.Context, key string) (Value, error) {
 
 	if len(resp.Kvs) == 1 {
 		return Value{
+			Key:      resp.Kvs[0].Key,
 			Data:     resp.Kvs[0].Value,
 			Modified: resp.Kvs[0].ModRevision,
 		}, nil
 	}
 
-	return Value{}, nil
+	return Value{}, ErrNotFound
 }
 
 func (c *client) Put(ctx context.Context, key string, value []byte) error {

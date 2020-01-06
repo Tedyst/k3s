@@ -51,7 +51,7 @@ func newContext(ctx context.Context, cfg string) (*Context, error) {
 		Apps:  apps.NewFactoryFromConfigOrDie(restConfig),
 		Batch: batch.NewFactoryFromConfigOrDie(restConfig),
 		Core:  core.NewFactoryFromConfigOrDie(restConfig),
-		Apply: apply.New(k8s, apply.NewClientFactory(restConfig)),
+		Apply: apply.New(k8s, apply.NewClientFactory(restConfig)).WithDynamicLookup(),
 	}, nil
 }
 
@@ -62,7 +62,6 @@ func crds(ctx context.Context, config *rest.Config) error {
 	}
 
 	factory.BatchCreateCRDs(ctx, crd.NamespacedTypes(
-		"ListenerConfig.k3s.cattle.io/v1",
 		"Addon.k3s.cattle.io/v1",
 		"HelmChart.helm.cattle.io/v1")...)
 

@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/labels"
+
+	systemd "github.com/coreos/go-systemd/daemon"
 	"github.com/rancher/k3s/pkg/agent/config"
 	"github.com/rancher/k3s/pkg/agent/containerd"
 	"github.com/rancher/k3s/pkg/agent/flannel"
@@ -21,10 +24,11 @@ import (
 	"github.com/rancher/k3s/pkg/daemons/agent"
 	daemonconfig "github.com/rancher/k3s/pkg/daemons/config"
 	"github.com/rancher/k3s/pkg/rootless"
-	"github.com/rancher/wrangler-api/pkg/generated/controllers/core"
-	corev1 "github.com/rancher/wrangler-api/pkg/generated/controllers/core/v1"
-	"github.com/rancher/wrangler/pkg/start"
 	"github.com/sirupsen/logrus"
+	"k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -43,17 +47,10 @@ func run(ctx context.Context, cfg cmds.Agent, lb *loadbalancer.LoadBalancer) err
 		}
 	}
 
-	if nodeConfig.Docker || nodeConfig.ContainerRuntimeEndpoint != "" {
-		nodeConfig.AgentConfig.RuntimeSocket = nodeConfig.ContainerRuntimeEndpoint
-		nodeConfig.AgentConfig.CNIPlugin = true
-	} else {
+	if !nodeConfig.Docker && nodeConfig.ContainerRuntimeEndpoint == "" {
 		if err := containerd.Run(ctx, nodeConfig); err != nil {
 			return err
 		}
-	}
-
-	if err := syssetup.Configure(); err != nil {
-		return err
 	}
 
 	if err := tunnel.Setup(ctx, nodeConfig, lb.Update); err != nil {
@@ -64,16 +61,18 @@ func run(ctx context.Context, cfg cmds.Agent, lb *loadbalancer.LoadBalancer) err
 		return err
 	}
 
+	coreClient, err := coreClient(nodeConfig.AgentConfig.KubeConfigKubelet)
+	if err != nil {
+		return err
+	}
 	if !nodeConfig.NoFlannel {
-		if err := flannel.Run(ctx, nodeConfig); err != nil {
+		if err := flannel.Run(ctx, nodeConfig, coreClient.CoreV1().Nodes()); err != nil {
 			return err
 		}
 	}
 
-	if !nodeConfig.AgentConfig.DisableCCM {
-		if err := syncAddressesLabels(ctx, &nodeConfig.AgentConfig); err != nil {
-			return err
-		}
+	if err := syncLabels(ctx, &nodeConfig.AgentConfig, coreClient.CoreV1().Nodes()); err != nil {
+		return err
 	}
 
 	if !nodeConfig.AgentConfig.DisableNPC {
@@ -86,10 +85,20 @@ func run(ctx context.Context, cfg cmds.Agent, lb *loadbalancer.LoadBalancer) err
 	return ctx.Err()
 }
 
+func coreClient(cfg string) (kubernetes.Interface, error) {
+	restConfig, err := clientcmd.BuildConfigFromFlags("", cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return kubernetes.NewForConfig(restConfig)
+}
+
 func Run(ctx context.Context, cfg cmds.Agent) error {
 	if err := validate(); err != nil {
 		return err
 	}
+	syssetup.Configure()
 
 	if cfg.Rootless && !cfg.RootlessAlreadyUnshared {
 		if err := rootless.Rootless(cfg.DataDir); err != nil {
@@ -100,10 +109,6 @@ func Run(ctx context.Context, cfg cmds.Agent) error {
 	cfg.DataDir = filepath.Join(cfg.DataDir, "agent")
 	os.MkdirAll(cfg.DataDir, 0700)
 
-	if cfg.ClusterSecret != "" {
-		cfg.Token = "K10node:" + cfg.ClusterSecret
-	}
-
 	lb, err := loadbalancer.Setup(ctx, cfg)
 	if err != nil {
 		return err
@@ -113,7 +118,7 @@ func Run(ctx context.Context, cfg cmds.Agent) error {
 	}
 
 	for {
-		tmpFile, err := clientaccess.AgentAccessInfoToTempKubeConfig("", cfg.ServerURL, cfg.Token)
+		newToken, err := clientaccess.NormalizeAndValidateTokenForUser(cfg.ServerURL, cfg.Token, "node")
 		if err != nil {
 			logrus.Error(err)
 			select {
@@ -123,10 +128,11 @@ func Run(ctx context.Context, cfg cmds.Agent) error {
 			}
 			continue
 		}
-		os.Remove(tmpFile)
+		cfg.Token = newToken
 		break
 	}
 
+	systemd.SdNotify(true, "READY=1\n")
 	return run(ctx, cfg, lb)
 }
 
@@ -149,73 +155,72 @@ func validate() error {
 	return nil
 }
 
-func syncAddressesLabels(ctx context.Context, agentConfig *daemonconfig.Agent) error {
+func syncLabels(ctx context.Context, agentConfig *daemonconfig.Agent, nodes v1.NodeInterface) error {
 	for {
-		nodeController, nodeCache, err := startNodeController(ctx, agentConfig)
+		node, err := nodes.Get(agentConfig.NodeName, metav1.GetOptions{})
 		if err != nil {
 			logrus.Infof("Waiting for kubelet to be ready on node %s: %v", agentConfig.NodeName, err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		nodeCached, err := nodeCache.Get(agentConfig.NodeName)
-		if err != nil {
-			logrus.Infof("Waiting for kubelet to be ready on node %s: %v", agentConfig.NodeName, err)
-			time.Sleep(1 * time.Second)
-			continue
+
+		newLabels, updateMutables := updateMutableLabels(agentConfig, node.Labels)
+
+		updateAddresses := !agentConfig.DisableCCM
+		if updateAddresses {
+			newLabels, updateAddresses = updateAddressLabels(agentConfig, newLabels)
 		}
-		node := nodeCached.DeepCopy()
-		updated := updateLabelMap(ctx, agentConfig, node.Labels)
-		if updated {
-			_, err = nodeController.Update(node)
-			if err == nil {
-				logrus.Infof("addresses labels has been set succesfully on node: %s", agentConfig.NodeName)
-				break
+
+		if updateAddresses || updateMutables {
+			node.Labels = newLabels
+			if _, err := nodes.Update(node); err != nil {
+				logrus.Infof("Failed to update node %s: %v", agentConfig.NodeName, err)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(time.Second):
+					continue
+				}
 			}
-			logrus.Infof("Failed to update node %s: %v", agentConfig.NodeName, err)
-			time.Sleep(1 * time.Second)
-			continue
+			logrus.Infof("labels have been set successfully on node: %s", agentConfig.NodeName)
+		} else {
+			logrus.Infof("labels have already set on node: %s", agentConfig.NodeName)
 		}
-		logrus.Infof("addresses labels has already been set succesfully on node: %s", agentConfig.NodeName)
-		return nil
+
+		break
 	}
+
 	return nil
 }
 
-func startNodeController(ctx context.Context, agentConfig *daemonconfig.Agent) (corev1.NodeController, corev1.NodeCache, error) {
-	restConfig, err := clientcmd.BuildConfigFromFlags("", agentConfig.KubeConfigKubelet)
-	if err != nil {
-		return nil, nil, err
-	}
-	coreFactory := core.NewFactoryFromConfigOrDie(restConfig)
-	nodeController := coreFactory.Core().V1().Node()
-	nodeCache := nodeController.Cache()
-	if err := start.All(ctx, 1, coreFactory); err != nil {
-		return nil, nil, err
-	}
+func updateMutableLabels(agentConfig *daemonconfig.Agent, nodeLabels map[string]string) (map[string]string, bool) {
+	result := map[string]string{}
 
-	return nodeController, nodeCache, nil
+	for _, m := range agentConfig.NodeLabels {
+		var (
+			v string
+			p = strings.SplitN(m, `=`, 2)
+			k = p[0]
+		)
+		if len(p) > 1 {
+			v = p[1]
+		}
+		result[k] = v
+	}
+	result = labels.Merge(nodeLabels, result)
+	return result, !equality.Semantic.DeepEqual(nodeLabels, result)
 }
 
-func updateLabelMap(ctx context.Context, agentConfig *daemonconfig.Agent, nodeLabels map[string]string) bool {
-	if nodeLabels == nil {
-		nodeLabels = make(map[string]string)
+func updateAddressLabels(agentConfig *daemonconfig.Agent, nodeLabels map[string]string) (map[string]string, bool) {
+	result := map[string]string{
+		InternalIPLabel: agentConfig.NodeIP,
+		HostnameLabel:   agentConfig.NodeName,
 	}
-	updated := false
-	if internalIPLabel, ok := nodeLabels[InternalIPLabel]; !ok || internalIPLabel != agentConfig.NodeIP {
-		nodeLabels[InternalIPLabel] = agentConfig.NodeIP
-		updated = true
+
+	if agentConfig.NodeExternalIP != "" {
+		result[ExternalIPLabel] = agentConfig.NodeExternalIP
 	}
-	if hostnameLabel, ok := nodeLabels[HostnameLabel]; !ok || hostnameLabel != agentConfig.NodeName {
-		nodeLabels[HostnameLabel] = agentConfig.NodeName
-		updated = true
-	}
-	nodeExternalIP := agentConfig.NodeExternalIP
-	if externalIPLabel := nodeLabels[ExternalIPLabel]; externalIPLabel != nodeExternalIP && nodeExternalIP != "" {
-		nodeLabels[ExternalIPLabel] = nodeExternalIP
-		updated = true
-	} else if nodeExternalIP == "" && externalIPLabel != "" {
-		delete(nodeLabels, ExternalIPLabel)
-		updated = true
-	}
-	return updated
+
+	result = labels.Merge(nodeLabels, result)
+	return result, !equality.Semantic.DeepEqual(nodeLabels, result)
 }
