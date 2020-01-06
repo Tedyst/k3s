@@ -59,12 +59,13 @@ fi
 mkdir -p bin
 
 # Allow cross-compiling to arm
-if [ "$1" == "arm" ]; then
+if [ "${ARCH}" == "arm" ]; then
+    export TAGS="ctrd apparmor no_btrfs netcgo osusergo providerless $DQLITE_TAGS"
     export GOOS=linux
     export GOARCH=arm
     export GOARM=6
     export CC=arm-linux-gnueabi-gcc
-    export CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH
+    export CMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH
     go env
 fi
 
@@ -116,7 +117,7 @@ ln -s containerd ./bin/ctr
 # CGO_ENABLED=0 go build -tags "$TAGS" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC" -o bin/containerd ./cmd/containerd/
 echo Building runc
 
-if [ "$1" == "arm" ]; then
+if [ "${ARCH}" == "arm" ]; then
     make EXTRA_LDFLAGS="-w -s" BUILDTAGS="apparmor" -C ./vendor/github.com/opencontainers/runc static
 else
     make EXTRA_LDFLAGS="-w -s" BUILDTAGS="apparmor seccomp" -C ./vendor/github.com/opencontainers/runc static

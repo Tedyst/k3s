@@ -42,14 +42,10 @@ cp ./build/out/data.tar.gz ./build/data/${HASH}.tgz
 
 BIN_SUFFIX="-${ARCH}"
 
-if [ "$1" == "arm" ]; then
+if [ ${ARCH} = amd64 ]; then
+    BIN_SUFFIX=""
+elif [ ${ARCH} = arm ]; then
     BIN_SUFFIX="-armhf"
-else
-    if [ ${ARCH} = amd64 ]; then
-        BIN_SUFFIX=""
-    elif [ ${ARCH} = arm ]; then
-        BIN_SUFFIX="-armhf"
-    fi
 fi
 CMD_NAME=dist/artifacts/k3s${BIN_SUFFIX}
 

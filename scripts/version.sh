@@ -12,8 +12,9 @@ if [ -z "${COMMIT}" ]; then
 fi
 
 GIT_TAG=${DRONE_TAG:-$(git tag -l --contains HEAD | head -n 1)}
-
-ARCH=$(go env GOARCH)
+if [ -z "${ARCH+xxx}" ]; then
+    ARCH=$(go env GOARCH)
+fi
 SUFFIX="-${ARCH}"
 
 VERSION_CONTAINERD=$(grep github.com/containerd/containerd go.mod | head -n1 | awk '{print $4}')
